@@ -26,6 +26,108 @@ from typing import Dict, List, Optional, Tuple
 from enum import Enum
 
 
+@dataclass
+class TextIntensityProfile:
+    """
+    Captures expressive intensity signals in text that modulate CPTSD scoring.
+
+    Key insight: HOW something is expressed matters as much as WHAT is expressed.
+    ALL CAPS frustration is categorically different from quiet self-erasure.
+    Intensity is a protective signal — someone screaming is still regulated enough to be loud.
+    """
+    caps_ratio: float = 0.0          # Ratio of uppercase words to total words (0-1)
+    exclamation_density: float = 0.0 # Exclamation marks per 100 words
+    ellipsis_density: float = 0.0    # Trailing offs per 100 words (trailing/collapse signal)
+    word_repetition: float = 0.0     # Repeated words (emphasis vs. dissociative looping)
+    sentence_fragments: float = 0.0  # Incomplete sentences (fragmentation signal)
+    expressive_intensity: float = 0.0  # Composite outward intensity score
+
+    # Interpretation flags
+    is_venting: bool = False          # High intensity, outward expression
+    is_collapsing: bool = False       # Low intensity, inward, trailing, fragmenting
+    is_dissociating: bool = False     # Flat, repetitive, incomplete
+
+    def intensity_summary(self) -> str:
+        if self.is_venting:
+            return f"VENTING — high expressive output (caps:{self.caps_ratio:.2f}), outward regulation"
+        elif self.is_collapsing:
+            return f"COLLAPSING — low output, inward, trailing off"
+        elif self.is_dissociating:
+            return f"DISSOCIATING — flat/repetitive pattern"
+        else:
+            return f"NEUTRAL — standard expressive intensity"
+
+
+class TextIntensityAnalyzer:
+    """
+    Analyzes expressive intensity of text to modulate trauma scoring.
+
+    Used to distinguish:
+    - "GOD I'M SO FRUSTRATED I COULD DIE" (venting, healthy fight response)
+    - "i could die... i just... never mind" (collapse, genuine distress)
+
+    High caps + exclamations = outward expression = modulate breach/collapse DOWN
+    Low caps + ellipsis + fragments = inward collapse = modulate breach/collapse UP
+    """
+
+    VENTING_THRESHOLD = 0.3       # caps_ratio above this = likely venting
+    COLLAPSE_ELLIPSIS = 2.0       # ellipsis density above this = trailing/collapse
+    FRAGMENT_THRESHOLD = 0.4      # fragment ratio above this = concerning
+
+    def analyze(self, text: str) -> TextIntensityProfile:
+        words = text.split()
+        word_count = len(words)
+
+        if word_count == 0:
+            return TextIntensityProfile()
+
+        # Caps ratio — words that are ALL CAPS (excluding single letters and common abbrevs)
+        caps_words = [w for w in words if w.isupper() and len(w) > 1]
+        caps_ratio = len(caps_words) / word_count
+
+        # Exclamation density
+        exclamation_count = text.count('!')
+        exclamation_density = (exclamation_count / max(word_count / 100, 1))
+
+        # Ellipsis density — trailing off signal
+        ellipsis_count = len(re.findall(r'\.{2,}', text))
+        ellipsis_density = (ellipsis_count / max(word_count / 100, 1))
+
+        # Word repetition — same word 3+ times (emphasis or dissociative looping)
+        word_freq = {}
+        for w in [w.lower().strip('.,!?') for w in words]:
+            word_freq[w] = word_freq.get(w, 0) + 1
+        repeated = sum(1 for count in word_freq.values() if count >= 3)
+        word_repetition = repeated / max(word_count, 1)
+
+        # Sentence fragments — sentences under 3 words
+        sentences = re.split(r'[.!?]+', text)
+        short_sentences = [s for s in sentences if 0 < len(s.split()) < 3]
+        sentence_fragments = len(short_sentences) / max(len(sentences), 1)
+
+        # Composite expressive intensity — outward expression
+        expressive_intensity = min(1.0, (caps_ratio * 0.5) + (exclamation_density * 0.1) + (word_repetition * 0.2))
+
+        # Interpret
+        is_venting = caps_ratio >= self.VENTING_THRESHOLD and ellipsis_density < self.COLLAPSE_ELLIPSIS
+        is_collapsing = ellipsis_density >= self.COLLAPSE_ELLIPSIS or (
+            caps_ratio < 0.05 and sentence_fragments >= self.FRAGMENT_THRESHOLD
+        )
+        is_dissociating = word_repetition > 0.15 and caps_ratio < 0.05
+
+        return TextIntensityProfile(
+            caps_ratio=caps_ratio,
+            exclamation_density=exclamation_density,
+            ellipsis_density=ellipsis_density,
+            word_repetition=word_repetition,
+            sentence_fragments=sentence_fragments,
+            expressive_intensity=expressive_intensity,
+            is_venting=is_venting,
+            is_collapsing=is_collapsing,
+            is_dissociating=is_dissociating,
+        )
+
+
 class TraumaResponse(Enum):
     """Primary trauma response patterns detectable in language"""
     FAWN = "fawn"           # Excessive appeasing, self-erasure, over-explaining
@@ -215,6 +317,7 @@ class CPTSDScorer:
 
     def __init__(self):
         self.lexicon = CPTSDLexicon()
+        self.intensity_analyzer = TextIntensityAnalyzer()
 
     def _count_matches(self, text: str, patterns: List[str]) -> int:
         """Count regex pattern matches in text"""
@@ -233,7 +336,6 @@ class CPTSDScorer:
         """
         if text_length == 0:
             return 0.0
-        # Normalize by text length (per 100 words) then apply saturation
         density = (count / max(text_length / 100, 1))
         return min(1.0, density * sensitivity)
 
@@ -266,7 +368,10 @@ class CPTSDScorer:
         """
         word_count = len(text.split())
 
-        # Score each dimension
+        # Analyze expressive intensity first — this modulates everything
+        intensity = self.intensity_analyzer.analyze(text)
+
+        # Score each dimension on lowercased text
         hypervigilance_count = self._count_matches(text, self.lexicon.hypervigilance_patterns)
         shame_count = self._count_matches(text, self.lexicon.shame_patterns)
         fragmentation_count = self._count_matches(text, self.lexicon.fragmentation_patterns)
@@ -282,9 +387,28 @@ class CPTSDScorer:
             'narrative_fragmentation': self._normalize(fragmentation_count, word_count, 0.6),
             'self_abandonment': self._normalize(self_abandonment_count, word_count, 0.5),
             'dissociation': self._normalize(dissociation_count, word_count, 0.4),
-            'window_breach': self._normalize(window_breach_count, word_count, 1.5),  # High sensitivity — safety critical
+            'window_breach': self._normalize(window_breach_count, word_count, 1.5),
             'relational_collapse': self._normalize(relational_collapse_count, word_count, 0.5),
         }
+
+        # INTENSITY MODULATION
+        # Venting (high caps, outward) reduces breach and collapse interpretation
+        if intensity.is_venting:
+            scores['window_breach'] *= 0.3      # "I COULD DIE" ≠ suicidal ideation
+            scores['shame_density'] *= 0.5      # "SO FRUSTRATED" ≠ shame spiral
+            scores['dissociation'] *= 0.2       # Can't be dissociating if you're this loud
+            # Boost hypervigilance/fight — that's what's actually happening
+            scores['hypervigilance'] = min(1.0, scores['hypervigilance'] + 0.2)
+
+        # Collapsing (trailing, quiet, fragmenting) amplifies breach and collapse
+        if intensity.is_collapsing:
+            scores['window_breach'] = min(1.0, scores['window_breach'] * 1.5)
+            scores['shame_density'] = min(1.0, scores['shame_density'] * 1.3)
+            scores['narrative_fragmentation'] = min(1.0, scores['narrative_fragmentation'] + 0.2)
+
+        # Dissociating (flat, repetitive) amplifies dissociation score
+        if intensity.is_dissociating:
+            scores['dissociation'] = min(1.0, scores['dissociation'] + 0.3)
 
         # Window of tolerance: inverse of breach score, modulated by dissociation
         window_of_tolerance = max(0.0, 1.0 - scores['window_breach'] - (scores['dissociation'] * 0.3))
@@ -302,6 +426,11 @@ class CPTSDScorer:
 
         # Detect trauma response pattern
         primary, secondary = self._detect_primary_response(scores)
+
+        # If venting, override primary to FIGHT regardless of other scores
+        if intensity.is_venting and primary != TraumaResponse.FIGHT:
+            secondary = primary
+            primary = TraumaResponse.FIGHT
 
         # Build signature
         signature = CPTSDSignature(
